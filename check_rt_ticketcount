@@ -1,0 +1,211 @@
+#!/usr/bin/env perl
+
+# check_rt_ticketcount
+# a nagios check that will take arguments to specify an RT instance and ticketSQL
+# it will then alert based on the number of tickets matching.
+# Requirements:
+#
+# RT::Client::REST
+# Nagios::Plugin
+# Config::Tiny
+
+use strict;
+use warnings;
+
+use Error qw(:try);
+use Carp;
+use Nagios::Plugin;
+
+use vars qw($VERSION $PROGNAME $verbose $warn $critical $timeout $result);
+$VERSION = '1.0';
+
+# get the base name of this script for use in the examples
+use File::Basename;
+$PROGNAME = basename($0);
+
+##############################################################################
+# define and get the command line options.
+# see the command line option guidelines at
+# http://nagiosplug.sourceforge.net/developer-guidelines.html#PLUGOPTIONS
+
+
+# Instantiate Nagios::Plugin object (the 'usage' parameter is mandatory)
+my $p = Nagios::Plugin->new(
+    usage => "Usage: %s -q|--query = \"TicketSQL goes here\"
+[ -v|--verbose ] [-t <timeout>]
+[ -c|--critical=<critical threshold> ]
+[ -w|--warning=<warning threshold> ]
+[ -f|--file = <CONFIGFILE> ]
+[ -u|--url = <URL>
+",
+    version => $VERSION,
+    blurb => 'A Nagios plugin to check Request Tracker for the number of tickets that satisfy some arbitrary TicketSQL.',
+
+extra => qq{
+
+THRESHOLDs for -w and -c are specified 'min:max' or 'min:' or ':max'
+(or 'max'). If specified '\@min:max', a warning status will be generated
+if the count *is* inside the specified range.
+
+See more threshold examples at http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT
+
+CONFIGFILE
+location of the file containing the auth credentials that nagios use to talk to RT
+The format is:
+
+user = my_nagios_user_rt
+passwd = their_password
+
+URL
+defaults to https://localhost
+
+Examples:
+
+$PROGNAME -w 10 -c 18 
+
+Returns a warning if the resulting number is greater than 10,
+or a critical error if it is greater than 18.
+
+$PROGNAME -w 10 : -c 4 : 
+Returns a warning if the resulting number is less than 10,
+or a critical error if it is less than 4.
+
+$PROGNAME -q \'Queue="11"\'
+
+$PROGNAME -u https://rt.example.com --file /etc/nagios/rtrc --query 'queue =\"work_queue\" and status=\"open\" and created < \"5 minutes ago\"' -c 5 -w 2
+
+Usage with Nagios:
+
+define service {
+  use                            generic-service
+  service_description            check-queue
+  host_name                      rt.example.com
+  check_command                  check_rt_ticketcount!https://rt.example.com!queue ="work_queue" and (status="open" or status="new") and created < "5 minutes ago"!2!5
+}
+
+define command{
+        command_name    check_rt_ticketcount
+        command_line    \$USER1\$/check_rt_ticketcount -f /etc/nagios/rtrc -u "\$ARG1\$" --query '\$ARG2\$' -w \$ARG3\$ -c \$ARG4\$
+}    
+
+
+Requirements:
+
+RT::Client::REST
+Nagios::Plugin
+Config::Tiny
+
+}
+
+);
+
+$p->add_arg(
+  spec => 'warning|w=s',
+
+  help =>
+  qq{-w, --warning=INTEGER:INTEGER
+  Minimum and maximum number of allowable result, outside of which a
+  warning will be generated. If omitted, no warning is generated.},
+
+# required => 1,
+# default => 10,
+);
+
+$p->add_arg(
+  spec => 'critical|c=s',
+
+  help =>
+  qq{-c, --critical=INTEGER:INTEGER
+  Minimum and maximum number of the generated result, outside of
+  which a critical will be generated. },
+);
+
+$p->add_arg(
+  spec => 'file|f=s',
+  help => qq{-f, --file=CONFIGFILE
+  This is the configfile that contains the auth credentials that this check should use to query RT, default: %s.},
+  required => 0,
+  default => '/etc/nagios/rtrc',
+);
+
+$p->add_arg(
+  spec => 'url|u=s',
+  help => qq{-u, --url=URL
+  The URL for the RT instance to query, default: https://localhost.},
+  required => 0,
+  default  => "https://localhost"
+);
+
+$p->add_arg(spec => 'query|q=s',
+    help => "Specify the TicketSQL query to send, default: %s",
+    default => "Queue='general'"
+);
+
+# Parse arguments and process standard ones (e.g. usage, help, version)
+$p->getopts;
+
+
+# perform sanity checking on command line options
+if ( (! defined $p->opts->file) || (!(-s $p->opts->file) ) || (!( -r $p->opts->file)) ) {
+    $p->nagios_die( "config problem: ".$p->opts->file );
+}
+
+unless ( defined $p->opts->warning || defined $p->opts->critical ) {
+$p->nagios_die( " you didn't supply a threshold argument " );
+}
+
+###################
+## CHECK STUFF HERE
+###################
+
+my $query=($p->opts->query);
+
+use RT::Client::REST;
+use Config::Tiny;
+
+my $config = Config::Tiny->new;
+$config = Config::Tiny->read( $p->opts->file );
+
+my $user = $config->{_}->{user};
+my $pass = $config->{_}->{pass};
+my $url = $p->opts->url;
+
+my $rt = RT::Client::REST->new(
+    server => $url,
+    timeout => 30,
+);
+
+try {
+  $rt->login(username => $user, password => $pass);
+} catch Exception::Class::Base with {
+  croak("failed to login to $url :",shift->message);
+};
+
+# Find all tickets that satisfy the specified query
+my @ids = $rt->search(
+  type => 'ticket',
+  query => $query,
+);
+
+my $result = scalar(@ids);
+
+
+##############################################################################
+# check the result against the defined warning and critical thresholds,
+# output the result and exit
+#$p->nagios_exit(
+#  return_code => $p->check_threshold(check => $result,
+#                                     warning => $p->opts->warning,
+#                                     critical => $p->opts->critical,
+#                                    ),
+#  message => " matching tickets was $result"
+#);
+
+$p->nagios_exit(
+  $p->check_threshold(check => $result,
+                      warning => $p->opts->warning,
+                      critical => $p->opts->critical,
+                     ),
+  " matching tickets was $result"
+);
+
