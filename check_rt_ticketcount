@@ -54,7 +54,7 @@ location of the file containing the auth credentials that nagios use to talk to 
 The format is:
 
 user = my_nagios_user_rt
-passwd = their_password
+pass = their_password
 
 URL
 defaults to https://localhost
